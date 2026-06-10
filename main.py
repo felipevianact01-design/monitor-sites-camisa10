@@ -4,11 +4,12 @@ import time
 import hashlib
 import asyncio
 import logging
+import base64
 from datetime import datetime
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
@@ -18,15 +19,65 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="Monitor de Sites")
 
 URLS_FILE = Path("urls.json")
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+GITHUB_REPO  = os.environ.get("GITHUB_REPO", "")
+GITHUB_FILE  = "urls.json"
+
+GH_HEADERS = {
+    "Authorization": f"Bearer {GITHUB_TOKEN}",
+    "Accept": "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+}
 
 
-def load_urls():
+async def load_urls() -> list:
+    if GITHUB_TOKEN and GITHUB_REPO:
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                r = await client.get(
+                    f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_FILE}",
+                    headers=GH_HEADERS,
+                )
+            if r.status_code == 200:
+                content = base64.b64decode(r.json()["content"]).decode("utf-8")
+                return json.loads(content)
+        except Exception as e:
+            logger.error(f"Erro ao ler GitHub: {e}")
     if URLS_FILE.exists():
         return json.loads(URLS_FILE.read_text(encoding="utf-8"))
     return []
 
 
-def save_urls(urls):
+async def save_urls(urls: list) -> None:
+    if GITHUB_TOKEN and GITHUB_REPO:
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                r = await client.get(
+                    f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_FILE}",
+                    headers=GH_HEADERS,
+                )
+                sha = r.json().get("sha") if r.status_code == 200 else None
+
+                encoded = base64.b64encode(
+                    json.dumps(urls, ensure_ascii=False, indent=2).encode("utf-8")
+                ).decode("utf-8")
+
+                body = {"message": "atualiza urls.json via monitor", "content": encoded}
+                if sha:
+                    body["sha"] = sha
+
+                pr = await client.put(
+                    f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_FILE}",
+                    headers=GH_HEADERS,
+                    json=body,
+                )
+            if pr.status_code not in (200, 201):
+                logger.error(f"Erro GitHub: {pr.text}")
+                return
+            logger.info("urls.json salvo no GitHub")
+            return
+        except Exception as e:
+            logger.error(f"Erro ao salvar no GitHub: {e}")
     URLS_FILE.write_text(json.dumps(urls, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -51,10 +102,7 @@ async def check_url(entry: dict) -> dict:
         code = response.status_code
 
         if 200 <= code < 300:
-            if elapsed > 5000:
-                status, color = "Lento", "yellow"
-            else:
-                status, color = "Online", "green"
+            status, color = ("Lento", "yellow") if elapsed > 5000 else ("Online", "green")
         elif 300 <= code < 400:
             status, color = "Redirecionando", "yellow"
         else:
@@ -91,7 +139,7 @@ async def dashboard():
 
 @app.get("/api/status")
 async def get_status():
-    urls = load_urls()
+    urls = await load_urls()
     if not urls:
         return []
     results = await asyncio.gather(*[check_url(u) for u in urls])
@@ -101,28 +149,28 @@ async def get_status():
 
 @app.get("/api/urls")
 async def get_urls():
-    return load_urls()
+    return await load_urls()
 
 
 @app.post("/api/urls")
 async def add_url(entry: UrlEntry):
-    urls = load_urls()
+    urls = await load_urls()
     new_entry = {
         "id": hashlib.md5(f"{entry.name}{entry.url}{time.time()}".encode()).hexdigest()[:8],
         "name": entry.name.strip(),
         "url": entry.url.strip(),
     }
     urls.append(new_entry)
-    save_urls(urls)
+    await save_urls(urls)
     logger.info(f"URL adicionada: {entry.name} — {entry.url}")
     return new_entry
 
 
 @app.delete("/api/urls/{url_id}")
 async def delete_url(url_id: str):
-    urls = load_urls()
+    urls = await load_urls()
     urls = [u for u in urls if u["id"] != url_id]
-    save_urls(urls)
+    await save_urls(urls)
     return {"ok": True}
 
 
@@ -159,13 +207,10 @@ HTML = """<!DOCTYPE html>
     display: flex;
     align-items: center;
     gap: 10px;
+    flex-wrap: wrap;
   }
 
-  .summary {
-    display: flex;
-    gap: 10px;
-    font-size: 0.85rem;
-  }
+  .summary { display: flex; gap: 10px; font-size: 0.85rem; }
   .badge {
     padding: 4px 12px;
     border-radius: 999px;
@@ -188,9 +233,7 @@ HTML = """<!DOCTYPE html>
   .btn:hover { opacity: 0.85; }
   .btn-primary   { background: #6366f1; color: #fff; }
   .btn-secondary { background: #1e293b; color: #94a3b8; border: 1px solid #334155; }
-  .btn-sm { padding: 5px 12px; font-size: 0.78rem; }
 
-  /* Add form */
   .add-form {
     background: #1e293b;
     border: 1px solid #334155;
@@ -201,11 +244,7 @@ HTML = """<!DOCTYPE html>
   }
   .add-form.open { display: block; }
   .add-form h2 { font-size: 1rem; margin-bottom: 14px; color: #f1f5f9; }
-  .form-row {
-    display: flex;
-    gap: 10px;
-    flex-wrap: wrap;
-  }
+  .form-row { display: flex; gap: 10px; flex-wrap: wrap; }
   .form-row input {
     flex: 1;
     min-width: 160px;
@@ -220,7 +259,6 @@ HTML = """<!DOCTYPE html>
   .form-row input:focus { border-color: #6366f1; }
   .form-row input::placeholder { color: #475569; }
 
-  /* Grid */
   #grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
@@ -232,11 +270,9 @@ HTML = """<!DOCTYPE html>
     border-radius: 12px;
     padding: 18px;
     border-left: 4px solid transparent;
-    position: relative;
     transition: transform 0.15s;
   }
   .card:hover { transform: translateY(-2px); }
-
   .card.green  { border-left-color: #22c55e; }
   .card.yellow { border-left-color: #f59e0b; }
   .card.red    { border-left-color: #ef4444; }
@@ -250,138 +286,64 @@ HTML = """<!DOCTYPE html>
     margin-bottom: 10px;
   }
 
-  .dot {
-    width: 12px; height: 12px;
-    border-radius: 50%;
-    flex-shrink: 0;
-    margin-top: 4px;
-  }
-  .dot.green  { background: #22c55e; box-shadow: 0 0 8px #22c55e88; }
-  .dot.yellow { background: #f59e0b; box-shadow: 0 0 8px #f59e0b88; }
-  .dot.red    { background: #ef4444; box-shadow: 0 0 8px #ef444488; animation: pulse 1.5s infinite; }
+  .dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; margin-top: 4px; }
+  .dot.green   { background: #22c55e; box-shadow: 0 0 8px #22c55e88; }
+  .dot.yellow  { background: #f59e0b; box-shadow: 0 0 8px #f59e0b88; }
+  .dot.red     { background: #ef4444; box-shadow: 0 0 8px #ef444488; animation: pulse 1.5s infinite; }
   .dot.loading { background: #475569; }
 
-  @keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.4; }
-  }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 
-  .card-name {
-    font-weight: 700;
-    font-size: 1rem;
-    color: #f1f5f9;
-    flex: 1;
-    word-break: break-word;
-  }
+  .card-name { font-weight: 700; font-size: 1rem; color: #f1f5f9; flex: 1; word-break: break-word; }
 
   .card-delete {
-    background: none;
-    border: none;
-    color: #475569;
-    cursor: pointer;
-    font-size: 1.1rem;
-    line-height: 1;
-    padding: 2px 4px;
-    border-radius: 4px;
-    transition: color 0.15s;
-    flex-shrink: 0;
+    background: none; border: none; color: #475569; cursor: pointer;
+    font-size: 1.1rem; line-height: 1; padding: 2px 4px; border-radius: 4px;
+    transition: color 0.15s; flex-shrink: 0;
   }
   .card-delete:hover { color: #ef4444; }
 
-  .card-url {
-    font-size: 0.78rem;
-    color: #64748b;
-    margin-bottom: 12px;
-    word-break: break-all;
-  }
+  .card-url { font-size: 0.78rem; color: #64748b; margin-bottom: 12px; word-break: break-all; }
 
-  .card-status {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-    margin-bottom: 8px;
-  }
+  .card-status { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
 
   .status-pill {
-    padding: 3px 10px;
-    border-radius: 999px;
-    font-size: 0.78rem;
-    font-weight: 700;
-    letter-spacing: 0.02em;
+    padding: 3px 10px; border-radius: 999px;
+    font-size: 0.78rem; font-weight: 700; letter-spacing: 0.02em;
   }
   .green  .status-pill { background: #14532d; color: #4ade80; }
   .yellow .status-pill { background: #422006; color: #fbbf24; }
   .red    .status-pill { background: #450a0a; color: #f87171; }
   .loading .status-pill { background: #1e293b; color: #94a3b8; }
 
-  .card-meta {
-    font-size: 0.75rem;
-    color: #64748b;
-    display: flex;
-    gap: 12px;
-    flex-wrap: wrap;
-  }
+  .card-meta { font-size: 0.75rem; color: #64748b; display: flex; gap: 12px; flex-wrap: wrap; }
 
   .card-error {
-    margin-top: 8px;
-    font-size: 0.75rem;
-    color: #f87171;
-    background: #450a0a44;
-    border-radius: 6px;
-    padding: 6px 10px;
+    margin-top: 8px; font-size: 0.75rem; color: #f87171;
+    background: #450a0a44; border-radius: 6px; padding: 6px 10px;
   }
 
-  /* Empty state */
-  #empty {
-    text-align: center;
-    padding: 60px 20px;
-    color: #475569;
-    display: none;
-  }
+  #empty { text-align: center; padding: 60px 20px; color: #475569; display: none; }
   #empty.show { display: block; }
   #empty h3 { font-size: 1.1rem; margin-bottom: 8px; }
 
-  /* Spinner */
   .spinner {
-    width: 16px; height: 16px;
-    border: 2px solid #334155;
-    border-top-color: #6366f1;
-    border-radius: 50%;
-    animation: spin 0.6s linear infinite;
-    display: inline-block;
-    margin-right: 6px;
-    vertical-align: middle;
+    width: 16px; height: 16px; border: 2px solid #334155; border-top-color: #6366f1;
+    border-radius: 50%; animation: spin 0.6s linear infinite;
+    display: inline-block; margin-right: 6px; vertical-align: middle;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
 
-  #last-check {
-    font-size: 0.78rem;
-    color: #475569;
-  }
+  #last-check { font-size: 0.78rem; color: #475569; }
 
-  /* Refresh bar */
-  .refresh-bar {
-    height: 3px;
-    background: #1e293b;
-    border-radius: 999px;
-    margin-bottom: 20px;
-    overflow: hidden;
-  }
-  .refresh-bar-fill {
-    height: 100%;
-    background: #6366f1;
-    border-radius: 999px;
-    transition: width 1s linear;
-  }
+  .refresh-bar { height: 3px; background: #1e293b; border-radius: 999px; margin-bottom: 20px; overflow: hidden; }
+  .refresh-bar-fill { height: 100%; background: #6366f1; border-radius: 999px; transition: width 1s linear; }
 </style>
 </head>
 <body>
 
 <header>
-  <div>
-    <h1>Monitor de <span>Sites</span></h1>
-  </div>
+  <h1>Monitor de <span>Sites</span></h1>
   <div class="header-right">
     <div class="summary">
       <span class="badge badge-green"  id="count-green">— online</span>
@@ -397,14 +359,13 @@ HTML = """<!DOCTYPE html>
   <h2>Novo site</h2>
   <div class="form-row">
     <input type="text" id="new-name" placeholder="Nome do cliente (ex: Marmoraria Silva)" />
-    <input type="url" id="new-url"  placeholder="URL do site (ex: https://cliente.com.br)" />
+    <input type="url"  id="new-url"  placeholder="URL do site (ex: https://cliente.com.br)" />
     <button class="btn btn-primary" onclick="addUrl()">Salvar</button>
     <button class="btn btn-secondary" onclick="toggleForm()">Cancelar</button>
   </div>
 </div>
 
 <div class="refresh-bar"><div class="refresh-bar-fill" id="bar" style="width:0%"></div></div>
-
 <span id="last-check"></span>
 
 <div id="grid"></div>
@@ -414,7 +375,7 @@ HTML = """<!DOCTYPE html>
 </div>
 
 <script>
-const REFRESH_INTERVAL = 5 * 60; // segundos
+const REFRESH_INTERVAL = 5 * 60;
 let countdown = REFRESH_INTERVAL;
 let timerInterval = null;
 let checking = false;
@@ -428,15 +389,13 @@ async function refresh() {
   btn.innerHTML = '<span class="spinner"></span>Verificando…';
   btn.disabled = true;
 
-  showLoadingCards();
+  await showLoadingCards();
 
   try {
     const res = await fetch('/api/status');
     const data = await res.json();
     renderCards(data);
-  } catch (e) {
-    console.error(e);
-  }
+  } catch (e) { console.error(e); }
 
   btn.innerHTML = 'Verificar agora';
   btn.disabled = false;
@@ -457,7 +416,6 @@ async function showLoadingCards() {
     return;
   }
   empty.classList.remove('show');
-
   grid.innerHTML = urls.map(u => `
     <div class="card loading" id="card-${u.id}">
       <div class="card-header">
@@ -466,17 +424,13 @@ async function showLoadingCards() {
         <button class="card-delete" onclick="deleteUrl('${u.id}')" title="Remover">✕</button>
       </div>
       <div class="card-url">${esc(u.url)}</div>
-      <div class="card-status">
-        <span class="status-pill"><span class="spinner"></span>Verificando…</span>
-      </div>
-    </div>
-  `).join('');
+      <div class="card-status"><span class="status-pill"><span class="spinner"></span>Verificando…</span></div>
+    </div>`).join('');
 }
 
 function renderCards(data) {
   const grid = document.getElementById('grid');
   const empty = document.getElementById('empty');
-
   if (data.length === 0) {
     grid.innerHTML = '';
     empty.classList.add('show');
@@ -484,14 +438,12 @@ function renderCards(data) {
     return;
   }
   empty.classList.remove('show');
-
   grid.innerHTML = data.map(s => {
     const meta = [
       s.code ? `HTTP ${s.code}` : '',
       s.elapsed_ms != null ? `${s.elapsed_ms} ms` : '',
       s.checked_at ? `às ${s.checked_at}` : '',
     ].filter(Boolean).join(' · ');
-
     return `
       <div class="card ${s.color}" id="card-${s.id}">
         <div class="card-header">
@@ -499,22 +451,17 @@ function renderCards(data) {
           <span class="card-name">${esc(s.name)}</span>
           <button class="card-delete" onclick="deleteUrl('${s.id}')" title="Remover">✕</button>
         </div>
-        <div class="card-url">
-          <a href="${esc(s.url)}" target="_blank" style="color:inherit">${esc(s.url)}</a>
-        </div>
-        <div class="card-status">
-          <span class="status-pill">${esc(s.status)}</span>
-        </div>
+        <div class="card-url"><a href="${esc(s.url)}" target="_blank" style="color:inherit">${esc(s.url)}</a></div>
+        <div class="card-status"><span class="status-pill">${esc(s.status)}</span></div>
         <div class="card-meta">${esc(meta)}</div>
         ${s.error ? `<div class="card-error">${esc(s.error)}</div>` : ''}
-      </div>
-    `;
+      </div>`;
   }).join('');
-
-  const greens  = data.filter(s => s.color === 'green');
-  const yellows = data.filter(s => s.color === 'yellow');
-  const reds    = data.filter(s => s.color === 'red');
-  updateCounts(greens, yellows, reds);
+  updateCounts(
+    data.filter(s => s.color === 'green'),
+    data.filter(s => s.color === 'yellow'),
+    data.filter(s => s.color === 'red')
+  );
 }
 
 function updateCounts(g, y, r) {
@@ -525,32 +472,24 @@ function updateCounts(g, y, r) {
 
 function esc(str) {
   if (!str) return '';
-  return String(str)
-    .replace(/&/g,'&amp;')
-    .replace(/</g,'&lt;')
-    .replace(/>/g,'&gt;')
-    .replace(/"/g,'&quot;');
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
 function toggleForm() {
   const form = document.getElementById('add-form');
   form.classList.toggle('open');
-  if (form.classList.contains('open')) {
-    document.getElementById('new-name').focus();
-  }
+  if (form.classList.contains('open')) document.getElementById('new-name').focus();
 }
 
 async function addUrl() {
   const name = document.getElementById('new-name').value.trim();
   const url  = document.getElementById('new-url').value.trim();
   if (!name || !url) { alert('Preencha o nome e a URL.'); return; }
-
   await fetch('/api/urls', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, url }),
   });
-
   document.getElementById('new-name').value = '';
   document.getElementById('new-url').value  = '';
   toggleForm();
@@ -563,34 +502,26 @@ async function deleteUrl(id) {
   refresh();
 }
 
-// Auto-refresh timer
 function startTimer() {
   clearInterval(timerInterval);
   countdown = REFRESH_INTERVAL;
   updateBar();
-
   timerInterval = setInterval(() => {
     countdown--;
     updateBar();
-    if (countdown <= 0) {
-      refresh();
-    }
+    if (countdown <= 0) refresh();
   }, 1000);
 }
 
 function updateBar() {
-  const pct = ((REFRESH_INTERVAL - countdown) / REFRESH_INTERVAL) * 100;
-  document.getElementById('bar').style.width = pct + '%';
+  document.getElementById('bar').style.width =
+    ((REFRESH_INTERVAL - countdown) / REFRESH_INTERVAL * 100) + '%';
 }
 
-// Enter key on form
 document.addEventListener('keydown', e => {
-  if (e.key === 'Enter' && document.getElementById('add-form').classList.contains('open')) {
-    addUrl();
-  }
+  if (e.key === 'Enter' && document.getElementById('add-form').classList.contains('open')) addUrl();
 });
 
-// Init
 refresh().then(() => startTimer());
 </script>
 </body>
