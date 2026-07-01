@@ -8,14 +8,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Além dos projetos de código abaixo, o Claude Code atua como **gestor de tráfego** das contas de anúncios do Felipe. Workflow sempre: **Felipe propõe → Claude apresenta o plano com justificativa → Felipe aprova → Claude executa.** Nenhuma alteração em campanha sem aprovação. Campanhas sobem **pausadas** por padrão.
 
+### ⭐ Use SEMPRE a skill `gestao-trafego`
+Para **QUALQUER** tarefa de tráfego — analisar conta/campanha, ver performance, otimizar, negativar termos/palavras-chave, criar campanha, subir anúncio, comparar públicos, checar conversões/tracking — em Meta **ou** Google Ads, de qualquer cliente: **siga a skill `gestao-trafego`** (instalada em `~/.claude/skills/gestao-trafego/`). Ela tem o método validado, os scripts prontos (`scripts/gads_analise.py` para análise e `scripts/gads_negativar.py` para negativar) e os cuidados de negativação (frase vs palavra solta, sinais de emprego, manter geográficos, nunca cortar termo que converteu). **Não reconstrua o processo do zero.** Antes de agir numa conta, consulte o estado/otimizações já feitas na memória `googleads_gestao_contas.md`.
+
 ### Meta Ads — ✅ conectado (MCP nativo)
 Ferramentas `ads_*` disponíveis direto. ~20 contas acessíveis. Conta principal da Máquina Solo: **CA - Máquina 04** (`776852409940096`).
 
 ### Google Ads — ✅ conectado (ponte local) — configurado em 2026-06-11
 Conectado via **ponte MCP local** em `~/.claude/googleads_bridge.py` (servidor stdio que usa o SDK Python da Composio). Motivo da ponte: o gateway HTTP da Composio rejeitava a API key ("Invalid API key") mesmo ela sendo válida no SDK. Servidor MCP chamado `googleads` (scope user, em `~/.claude.json`).
 - Ferramentas `GOOGLEADS_*`: `MUTATE_CAMPAIGNS` (criar/editar/remover), `MUTATE_AD_GROUPS`, `SEARCH_STREAM_GAQL` (análise/negativar termos), `GET_CAMPAIGN_BY_ID/NAME`, `LIST_ACCESSIBLE_CUSTOMERS`, listas de clientes.
-- **As ferramentas só aparecem em sessões NOVAS do Claude Code.** Em sessões antigas, usar via `Bash` + SDK Composio (funciona igual).
-- `SEARCH_STREAM_GAQL`: passar `query` + `customer_id` no arguments.
+- ⚠️ As ferramentas `mcp__googleads__*` SEMPRE rodam na MCC e **ignoram o customer_id** — não servem para contas de cliente (dão `REQUESTED_METRICS_FOR_MANAGER`). **Use os scripts da skill** (`Bash` + proxy com header `login-customer-id: 5061973846`), que é o que acessa as contas filhas.
+- Python com as libs: `/Library/Frameworks/Python.framework/Versions/3.14/bin/python3` (o `python3` do PATH muda entre sessões e pode não ter o `composio`).
 - Detalhes técnicos completos: ver memória `googleads_bridge.md`.
 
 **Contas Google Ads** (todas BRL, sob a MCC "Felipe Viana | Clientes" = `5061973846`):
@@ -35,7 +38,7 @@ Conectado via **ponte MCP local** em `~/.claude/googleads_bridge.py` (servidor s
 ## Projetos nesta pasta
 
 ### Monitor de Sites
-**Painel visual de status dos sites dos clientes** — verde/amarelo/vermelho, auto-refresh a cada 5 minutos.
+**Painel visual de status dos sites dos clientes** — verde/vermelho (binário), auto-refresh a cada 5 minutos.
 
 Existem **duas instâncias independentes**, cada uma com seu próprio repositório e painel no Render:
 
@@ -72,6 +75,8 @@ O Render faz redeploy automático em ~1 minuto. **Não adicionar direto pelo pai
 - **Polling:** browser consulta `/api/check/result` a cada 2s até `checking=False`
 - **Concorrência:** semáforo de 5 verificações simultâneas por ciclo
 - **Cache:** URLs ficam em `_url_cache` (memória) — GitHub só é lido na inicialização
+- **Status binário:** qualquer resposta HTTP = verde; timeout/sem resposta = vermelho
+- **Detecção de suspensão:** resposta 200 com corpo contendo palavras-chave de suspensão = vermelho ("Suspenso")
 
 #### Variáveis de ambiente no Render (obrigatórias)
 
@@ -100,6 +105,8 @@ O Render faz redeploy automático em ~1 minuto. **Não adicionar direto pelo pai
 | Todos os sites como Timeout | Render tem limite de 30s por request | Já resolvido: verificação em background |
 | Instância demora pra responder | Free tier "dorme" após 15min inativo | Normal — primeiro acesso pode demorar 50s |
 | Erro de memória (email do Render) | Muitas conexões HTTP simultâneas | Já resolvido: semáforo limita concorrência |
+| Site suspenso aparece verde | Hostinger retorna HTTP 200 na página de suspensão | Já resolvido: verificação de palavras-chave no corpo da resposta |
+| 403 / 520 aparecia como erro | Cloudflare bloqueava httpx sem User-Agent | Já resolvido: status binário — qualquer resposta HTTP = verde |
 
 #### Como atualizar o código em ambas as instâncias
 Camisa 10 (via git normal):
@@ -492,6 +499,10 @@ Kommo → Funil de Vendas → Configurar Funil (Digital Pipeline) → em cada co
 10. **URL errada do endpoint de conversões** — `customers/{id}/conversionUploads:uploadClickConversions` não existe; URL correta é `customers/{id}:uploadClickConversions`
 11. **snake_case nos campos JSON do Google Ads** — a API REST exige camelCase; campos com snake_case são ignorados silenciosamente
 12. **MCC/login-customer-id ausente** — quando a conta cliente é gerenciada por uma MCC, o header `login-customer-id` é obrigatório; sem ele a API retorna `USER_PERMISSION_DENIED`
+
+### Bugs do Monitor de Sites:
+13. **Página de suspensão Hostinger aparecia como verde** — Hostinger retorna HTTP 200 com página de suspensão; a detecção por palavra-chave usava `"domain suspended"` que não bate com `"domain is suspended"` (tem o "is" no meio). Corrigido adicionando `"domain is suspended"` e `"your domain is suspended"` à lista. Lição: sempre confirmar o texto exato do HTML com `curl` antes de definir keywords.
+14. **Status amarelo/lento removido** — usuário queria apenas binário verde/vermelho: qualquer resposta HTTP = verde, sem resposta/timeout = vermelho. Isso também resolve falsos positivos de 403 e 520 (Cloudflare).
 
 ---
 
