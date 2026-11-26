@@ -14,12 +14,45 @@ Para **QUALQUER** tarefa de tráfego — analisar conta/campanha, ver performanc
 ### Meta Ads — ✅ conectado (MCP nativo)
 Ferramentas `ads_*` disponíveis direto. ~20 contas acessíveis. Conta principal da Máquina Solo: **CA - Máquina 04** (`776852409940096`).
 
+#### ⚠️ Ao CRIAR conjuntos no Meta — sempre definir `location_types` (evitar erro #1870194)
+Ao criar ad set via `ads_create_ad_set`, **SEMPRE** incluir `location_types` dentro de `geo_locations`. Se passar só `{"countries":["BR"]}` sem `location_types`, o Meta herda uma opção de localização descontinuada ("pessoas que moram / estiveram visitando / recentemente no local") e **bloqueia a publicação** com o erro:
+> "Seu público contém uma opção de direcionamento por localização que foi removida... (#1870194)"
+
+**Correção padrão:** usar `"location_types":["home","recent"]` (= "pessoas que moram ou estiveram recentemente no local"). Exemplo de `targeting`:
+```json
+{"geo_locations":{"countries":["BR"],"location_types":["home","recent"]}, "age_min":25, "age_max":65, ...}
+```
+**Checklist antes de finalizar qualquer criação de conjunto no Meta:** `location_types` presente? Advantage+ desligado (`targeting_automation.advantage_audience:0`) conforme pedido? Posicionamentos corretos? Isso evita o Felipe ter que duplicar/editar o conjunto no Gerenciador depois.
+
+#### 📋 Modelo de solicitação de campanha
+Para o Felipe pedir campanha nova de forma padronizada, existe o formulário `modelo-solicitacao-campanha.md` (na raiz deste projeto). Ele preenche os campos ⭐ obrigatórios (conta, objetivo, verba, datas, localização, públicos, anúncio) e o resto tem padrão (idade 25-65+, ambos gêneros, Advantage+ off, sobe pausado). Ao criar, seguir a nomenclatura padrão da conta (ver `references/tecnico.md` da skill) e finalizar anúncios de Reel/post no Gerenciador.
+
+#### 🩺 Análises que a skill cobre além da rotina
+A skill `gestao-trafego` também faz: (1) **diagnóstico de conta NOVA** (`date_preset=maximum` → o que já foi feito/funcionou, receita vencedora); (2) **auditoria de criativos + política do Meta** — caçar antes/depois e "atributos pessoais" que limitam entrega em saúde/estética, checar erros de entrega (`ads_get_errors`), copy (`ads_get_creatives`) e visual (`ads_get_ad_preview`). Detalhes em `references/tecnico.md`.
+
+### 🏢 Carteira Trivo Digital — agente `trivo-trafego`
+As contas da **Trivo Digital** (agência, "Squad Camisa 10" — maioria marmorarias + Ellenco, Movim, Viva Academia, Boa Obra, CarmoSul, J&R etc.) têm agente próprio: **`trivo-trafego`** (`~/.claude/agents/trivo-trafego.md`), que usa a skill `gestao-trafego` + memória `trivo_contas.md`. Google da Trivo fica na **MCC `4069524795`** → sempre `GADS_LOGIN=4069524795`, triagem com `gads_triagem_mcc.py`, negativação com `gads_negativar_direto.py`. **Não são Trivo** (carteira pessoal): Orto, Máquina Solo, JobMake, Bruna, Janete, Mk1/Vila Augusta, Maranha, Yasmin, Ricardo.
+
+**Clientes Meta com estado/análise salvos na memória:** Máquina Solo (`776852409940096`), e **Dra. Janete** — odontologia/lentes, conta `915672896022212`, clínicas Guarulhos(Maia)+Tatuapé; ver memória `janete_odonto.md` (histórico, receita vencedora e auditoria de criativos/política já feita).
+
 ### Google Ads — ✅ conectado (ponte local) — configurado em 2026-06-11
 Conectado via **ponte MCP local** em `~/.claude/googleads_bridge.py` (servidor stdio que usa o SDK Python da Composio). Motivo da ponte: o gateway HTTP da Composio rejeitava a API key ("Invalid API key") mesmo ela sendo válida no SDK. Servidor MCP chamado `googleads` (scope user, em `~/.claude.json`).
+
+> **⭐ ANÁLISE = API DIRETA (Caminho B, padrão desde ago/2026).** Para puxar dados de conta, use o script `~/.claude/skills/gestao-trafego/scripts/gads_analise_direto.py`, que fala **direto com a API do Google** usando as credenciais PRÓPRIAS do Felipe (OAuth refresh + developer token dele, em `~/.claude/gads_credenciais.env`, chmod 600, fora do git). Isso dá **cota dedicada** e acabou com o 429 diário da Composio (token compartilhado). A Composio segue só para negativação (`gads_negativar.py`) e como fallback. Se o OAuth der `invalid_grant`, atualizar o `gads_credenciais.env` com os valores novos do Render (serviço ponte-marmoraria).
 - Ferramentas `GOOGLEADS_*`: `MUTATE_CAMPAIGNS` (criar/editar/remover), `MUTATE_AD_GROUPS`, `SEARCH_STREAM_GAQL` (análise/negativar termos), `GET_CAMPAIGN_BY_ID/NAME`, `LIST_ACCESSIBLE_CUSTOMERS`, listas de clientes.
 - ⚠️ As ferramentas `mcp__googleads__*` SEMPRE rodam na MCC e **ignoram o customer_id** — não servem para contas de cliente (dão `REQUESTED_METRICS_FOR_MANAGER`). **Use os scripts da skill** (`Bash` + proxy com header `login-customer-id: 5061973846`), que é o que acessa as contas filhas.
 - Python com as libs: `/Library/Frameworks/Python.framework/Versions/3.14/bin/python3` (o `python3` do PATH muda entre sessões e pode não ter o `composio`).
 - Detalhes técnicos completos: ver memória `googleads_bridge.md`.
+
+#### ⚠️ Cota da API do Google Ads (erro 429 `RESOURCE_EXHAUSTED`) — RESOLVIDO com o Caminho B
+> **✅ Resolvido (ago/2026):** o 429 era do token **compartilhado da Composio**. Agora a análise usa o **token próprio do Felipe** via `gads_analise_direto.py` (cota dedicada) — ver o box acima. O texto abaixo fica como histórico e ainda vale se um dia cair no fallback da Composio.
+
+O developer token compartilhado da Composio tinha **limite diário de operações** (nível "Básico", ~15.000 ops/dia) e estourava com frequência. Sintomas e como lidar (só relevante no fallback):
+- **429 no meio de uma análise** = cota batida. A mensagem traz `Retry in Ns`; se N for dezenas de milhares de segundos (~16h), é o **limite DIÁRIO** — não adianta insistir, reseta à meia-noite (horário do Pacífico).
+- **Antes de rodar tudo, faça uma chamada leve de teste** (ex.: só `metrics.cost_micros`+`conversions` de 1 conta) pra confirmar que a cota está liberada.
+- **Espaçar as chamadas:** rodar as contas em sequência com `sleep 25-35` entre elas (não em paralelo). Consultas de campaign-level custam mais que keyword-level.
+- **Não rodar as 4 contas toda vez sem necessidade** — alternar/priorizar as que têm mudança recente. Se só precisa do total, puxar query leve em vez do `gads_analise.py` completo.
+- **Solução definitiva:** pedir **acesso Padrão (Standard)** no Centro de API do Google Ads (aumenta muito a cota). ⚠️ Verificar antes se o token que estoura é o do Felipe ou o **da Composia** (compartilhado) — se for da Composia, o upgrade não depende do Felipe.
 
 **Contas Google Ads** (todas BRL, sob a MCC "Felipe Viana | Clientes" = `5061973846`):
 
@@ -32,6 +65,52 @@ Conectado via **ponte MCP local** em `~/.claude/googleads_bridge.py` (servidor s
 | Nutri Yasmin | 9574446149 |
 | Ricardo Psicólogo | 6010250133 |
 | Nutri Bruna Morais | 9267198542 (CANCELADA) |
+
+---
+
+## 🎬 Canal Dark no YouTube (não é código deste repo, mas gerenciado aqui)
+
+Felipe está construindo canais dark/faceless no YouTube pra monetizar em dólar (objetivo: vários
+canais em paralelo, crescendo aos poucos). **Use SEMPRE a skill `canal-dark-youtube`** (instalada
+em `~/.claude/skills/canal-dark-youtube/`, agente `canal-dark` em `~/.claude/agents/canal-dark.md`)
+pra qualquer tarefa relacionada — escolher/minerar nicho, roteirizar vídeo, identidade visual,
+setup de canal no Studio, política de monetização. Não reconstrua o processo do zero.
+
+**Estado atual:** canal #1 "Der Innere Fels" (`@dereinnerefels`) — estoicismo narrado em alemão,
+já criado, 3 roteiros prontos, logo aprovada, capa em andamento. Estado completo e todas as
+decisões/lições ficam na memória `project_canal_dark_youtube.md` (seção "ESTADO ATUAL" no topo pra
+retomada rápida). O idioma de cada canal novo é decidido por mineração multilíngue, não é sempre
+inglês.
+
+---
+
+## 🧑‍💼 Auditoria de Atendimento Comercial (WhatsApp)
+
+Felipe encaminha **prints de conversa e áudios** de vendedores dos clientes dele atendendo leads
+que vieram de anúncio (Meta/Google Ads) — o objetivo é avaliar se o lead pago está sendo bem
+aproveitado no atendimento e devolver um documento com nota, pontos fortes/fracos e ações
+práticas pra aumentar agendamento/fechamento. **Use SEMPRE a skill `atendimento-comercial`**
+(instalada em `~/.claude/skills/atendimento-comercial/`) ou o agente dedicado **`analise-comercial`**
+(`~/.claude/agents/analise-comercial.md`) sempre que ele mandar print(s)/áudio(s) de WhatsApp de
+atendimento a lead, mesmo sem citar "auditoria" ou o nome da skill/agente. A skill já tem o
+framework de 9 critérios de avaliação (tempo de resposta, rapport, qualificação, condução ativa,
+tratamento de objeções, áudio vs. texto, personalização, follow-up, fechamento), scripts prontos
+de resposta a objeções do nicho, checklist de auditoria e o template fixo do relatório final —
+não reconstrua esse método do zero. Dado sensível (conversas reais de clientes) — tratar com
+discrição.
+
+---
+
+## 🤝 Prospecção e Aquisição de Clientes
+
+Para conseguir clientes novos (gestão de tráfego + serviços digitais: rastreamento CRM→CAPI,
+painel com a marca do cliente, auditoria de atendimento, atendente de IA no WhatsApp, Amrap TV),
+**use SEMPRE a skill `prospeccao-vendas`** (`~/.claude/skills/prospeccao-vendas/`) ou o agente
+**`prospeccao`** (`~/.claude/agents/prospeccao.md`): nicho/ICP, lista de leads (Biblioteca de
+Anúncios + Google Maps), raio-X gratuito, scripts de abordagem e follow-up, reunião SPIN,
+objeções, pacotes/preços sugeridos, proposta, contrato e funil. Funil em andamento na memória
+`prospeccao_pipeline.md`. Claude rascunha, **Felipe envia**. Nunca abordar cliente da Trivo para
+a carteira pessoal.
 
 ---
 
@@ -107,6 +186,8 @@ O Render faz redeploy automático em ~1 minuto. **Não adicionar direto pelo pai
 | Erro de memória (email do Render) | Muitas conexões HTTP simultâneas | Já resolvido: semáforo limita concorrência |
 | Site suspenso aparece verde | Hostinger retorna HTTP 200 na página de suspensão | Já resolvido: verificação de palavras-chave no corpo da resposta |
 | 403 / 520 aparecia como erro | Cloudflare bloqueava httpx sem User-Agent | Já resolvido: status binário — qualquer resposta HTTP = verde |
+| Timeout em site ativo | Site hospedado no Brasil sem CDN demora >8s dos EUA | Já resolvido: timeout aumentado para 15s |
+| Bandwidth Limit Exceeded aparece verde | Hospedagem retorna HTTP 200 com página de erro de banda | Já resolvido: keyword "bandwidth limit exceeded" na lista de suspensão |
 
 #### Como atualizar o código em ambas as instâncias
 Camisa 10 (via git normal):
@@ -503,6 +584,8 @@ Kommo → Funil de Vendas → Configurar Funil (Digital Pipeline) → em cada co
 ### Bugs do Monitor de Sites:
 13. **Página de suspensão Hostinger aparecia como verde** — Hostinger retorna HTTP 200 com página de suspensão; a detecção por palavra-chave usava `"domain suspended"` que não bate com `"domain is suspended"` (tem o "is" no meio). Corrigido adicionando `"domain is suspended"` e `"your domain is suspended"` à lista. Lição: sempre confirmar o texto exato do HTML com `curl` antes de definir keywords.
 14. **Status amarelo/lento removido** — usuário queria apenas binário verde/vermelho: qualquer resposta HTTP = verde, sem resposta/timeout = vermelho. Isso também resolve falsos positivos de 403 e 520 (Cloudflare).
+15. **Timeout em sites brasileiros sem CDN** — sites hospedados no Brasil sem CDN demoram >8s dos servidores EUA do Render; timeout aumentado de 8s para 15s.
+16. **Bandwidth Limit Exceeded aparecia como verde** — hospedagem retorna HTTP 200 com corpo "Bandwidth Limit Exceeded"; adicionado keyword à lista de detecção. Também adicionado "resource limit is reached" (erro 508).
 
 ---
 
