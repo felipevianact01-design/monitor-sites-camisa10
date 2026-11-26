@@ -88,7 +88,7 @@ async def run_all_checks():
             "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
         }
         async with httpx.AsyncClient(
-            timeout=8, follow_redirects=True,
+            timeout=15, follow_redirects=True,
             limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
             headers=browser_headers,
         ) as client:
